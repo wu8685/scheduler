@@ -3,7 +3,6 @@ package executor
 import (
 	"fmt"
 	"time"
-	"reflect"
 
 	"github.com/wu8685/scheduler/task"
 )
@@ -13,17 +12,17 @@ type Executor struct {
 	interval   time.Duration
 
 	tasks []task.Task
-	stop chan time.Duration
+	stop  chan struct{}
 }
 
-func NewExecutor(startDate time.Time, interval time.Duration) (*Executor) {
+func NewExecutor(startDate time.Time, interval time.Duration) *Executor {
 	exe := &Executor{
 		startDate,
 		interval,
 		[]task.Task{},
-		make(chan time.Duration, 1),
+		make(chan struct{}, 1),
 	}
-	runForever(exe.Run)
+	runOnce(exe.Run)
 	return exe
 }
 
@@ -32,62 +31,51 @@ func (exe *Executor) Register(t task.Task) *Executor {
 	return exe
 }
 
-func (exe *Executor) Run() error {
+func (exe *Executor) Run() {
 	toStart := exe.startPoint.Sub(time.Now())
 	if toStart <= 0 {
-		return fmt.Errorf("start date should not before now.")
+		fmt.Println("start date should not before now.")
+		return
 	}
 
 	select {
-		case <-time.After(toStart):
+	case <-time.After(toStart):
 		exe.runTasks()
-		case timeout:=<-exe.stop:
-		exe.interruptTasks(timeout)
-		return nil
+	case <-exe.stop:
+		exe.interruptTasks()
+		return
 	}
-	
-	timer := time.NewTimer(exe.interval)
+
+	times := 0
 	for {
+		times++
+		duration := exe.startPoint.Add(time.Duration(times) * exe.interval).Sub(time.Now())
+		if duration < 0 {
+			// If passed the timing, just ignore this time
+			continue
+		}
 		select {
-			case <-timer.C:
+		case <-time.After(duration):
 			exe.runTasks()
-			case timeout:=<-exe.stop:
-			exe.interruptTasks(timeout)
-			return nil
+		case <-exe.stop:
+			exe.interruptTasks()
+			return
 		}
 	}
 }
 
-func (exe *Executor) Stop(timeout time.Duration) {
-	exe.stop<-timeout
+func (exe *Executor) Stop() {
+	exe.stop <- struct{}{}
 }
 
 func (exe *Executor) runTasks() {
 	for _, t := range exe.tasks {
-		runForever(t.Do)
+		runOnce(t.Do)
 	}
 }
 
-func (exe *Executor) interruptTasks(timeout time.Duration) {
-	chans := []reflect.SelectCase{}
+func (exe *Executor) interruptTasks() {
 	for _, t := range exe.tasks {
-		finish := runUnderWatch(t.Interrupt)
-		chans = append(chans, reflect.SelectCase{
-			Dir: reflect.SelectRecv,
-			Chan: reflect.ValueOf(finish),
-		})
-	}
-	
-	required := len(chans)
-	for {
-		select {
-			case reflect.Select(chans):
-			required--
-			if required == 0 {
-				return
-			}
-			case <-time.After(timeout):
-			return
-		}
+		runOnce(t.Interrupt)
 	}
 }
